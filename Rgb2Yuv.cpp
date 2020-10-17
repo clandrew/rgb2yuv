@@ -38,7 +38,7 @@ interface DECLSPEC_UUID("9f251514-9d4d-4902-9d60-18988ab7d4b5") DECLSPEC_NOVTABL
 	STDMETHOD_(void, EndCapture)() PURE;
 };
 
-class TextureLoader
+class RgbTextureLoader
 {
 	ComPtr<IWICImagingFactory> m_wicImagingFactory;
 	std::vector<ComPtr<ID3D12Resource>> m_uploads;
@@ -222,7 +222,6 @@ struct DeviceResources
 	UINT fenceValue;
 	HANDLE fenceEvent;
 
-	ComPtr<ID3D12Resource> yuvResource;
 	ComPtr<ID3D12DescriptorHeap> uavHeap;
 
 	void Initialize()
@@ -273,95 +272,107 @@ struct DeviceResources
 	}
 };
 
-void DoConversion(ID3D12Resource* rgb, DeviceResources* deviceResources)
+class RgbToYuvConverter
 {
-	D3D12_RESOURCE_DESC loadedImageResourceDesc = rgb->GetDesc();
-
-	D3D12_DESCRIPTOR_HEAP_DESC uavHeapDesc = {};
-	uavHeapDesc.NumDescriptors = 3;
-	uavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-	uavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-	DX::ThrowIfFailed(deviceResources->device->CreateDescriptorHeap(&uavHeapDesc, IID_PPV_ARGS(&deviceResources->uavHeap)));
-	NAME_D3D12_OBJECT(deviceResources->uavHeap);
-
-	// Create render target resource
-	D3D12_RESOURCE_DESC resourceDesc{};
-	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-	resourceDesc.Width = loadedImageResourceDesc.Width;
-	resourceDesc.Height = loadedImageResourceDesc.Height;
-	resourceDesc.MipLevels = 1;
-	resourceDesc.DepthOrArraySize = 1;
-	resourceDesc.Format = DXGI_FORMAT_NV12;
-	resourceDesc.SampleDesc.Count = 1;
-	resourceDesc.SampleDesc.Quality = 0;
-	resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-	DX::ThrowIfFailed(deviceResources->device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
-		D3D12_HEAP_FLAG_NONE,
-		&resourceDesc,
-		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-		nullptr,
-		IID_PPV_ARGS(&deviceResources->yuvResource)));
-
-	CD3DX12_GPU_DESCRIPTOR_HANDLE uavHeapGpu(deviceResources->uavHeap->GetGPUDescriptorHandleForHeapStart());
-	UINT uavHandleSize = deviceResources->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-	CD3DX12_CPU_DESCRIPTOR_HANDLE rgbUavCpu(deviceResources->uavHeap->GetCPUDescriptorHandleForHeapStart(),				0 * uavHandleSize);
-	CD3DX12_CPU_DESCRIPTOR_HANDLE yuvLuminanceUavCpu(deviceResources->uavHeap->GetCPUDescriptorHandleForHeapStart(),	1 * uavHandleSize);
-	CD3DX12_CPU_DESCRIPTOR_HANDLE yuvChrominanceUavCpu(deviceResources->uavHeap->GetCPUDescriptorHandleForHeapStart(),	2 * uavHandleSize);
-
+public:
+	ComPtr<ID3D12Resource> CreateCompatibleYuvResource(ID3D12Resource* rgb, ID3D12Device* device)
 	{
-		D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-		uavDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; // Selects the luminance plane
-		uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-		deviceResources->device->CreateUnorderedAccessView(rgb, nullptr, &uavDesc, rgbUavCpu);
-	}
-	{
-		D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-		uavDesc.Format = DXGI_FORMAT_R8_UNORM; // Selects the luminance plane
-		uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-		deviceResources->device->CreateUnorderedAccessView(deviceResources->yuvResource.Get(), nullptr, &uavDesc, yuvLuminanceUavCpu);
-	}
-	{
-		D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-		uavDesc.Format = DXGI_FORMAT_R8G8_UNORM; // Selects the luminance plane
-		uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-		uavDesc.Texture2D.PlaneSlice = 1;
-		deviceResources->device->CreateUnorderedAccessView(deviceResources->yuvResource.Get(), nullptr, &uavDesc, yuvChrominanceUavCpu);
+		D3D12_RESOURCE_DESC loadedImageResourceDesc = rgb->GetDesc();
+
+		D3D12_RESOURCE_DESC resourceDesc{};
+		resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		resourceDesc.Width = loadedImageResourceDesc.Width;
+		resourceDesc.Height = loadedImageResourceDesc.Height;
+		resourceDesc.MipLevels = 1;
+		resourceDesc.DepthOrArraySize = 1;
+		resourceDesc.Format = DXGI_FORMAT_NV12;
+		resourceDesc.SampleDesc.Count = 1;
+		resourceDesc.SampleDesc.Quality = 0;
+		resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+		ComPtr<ID3D12Resource> result;
+		DX::ThrowIfFailed(device->CreateCommittedResource(
+			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+			D3D12_HEAP_FLAG_NONE,
+			&resourceDesc,
+			D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+			nullptr,
+			IID_PPV_ARGS(&result)));
+
+		return result;
 	}
 
-	CD3DX12_DESCRIPTOR_RANGE ranges[1];
-	CD3DX12_ROOT_PARAMETER parameter;
+	void DoConversion(ID3D12Resource* rgb, ID3D12Resource* yuv, DeviceResources* deviceResources)
+	{
+		D3D12_RESOURCE_DESC loadedImageResourceDesc = rgb->GetDesc();
 
-	ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0);
+		D3D12_DESCRIPTOR_HEAP_DESC uavHeapDesc = {};
+		uavHeapDesc.NumDescriptors = 3;
+		uavHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+		uavHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+		DX::ThrowIfFailed(deviceResources->device->CreateDescriptorHeap(&uavHeapDesc, IID_PPV_ARGS(&deviceResources->uavHeap)));
+		NAME_D3D12_OBJECT(deviceResources->uavHeap);
 
-	parameter.InitAsDescriptorTable(_countof(ranges), ranges, D3D12_SHADER_VISIBILITY_ALL);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE uavHeapGpu(deviceResources->uavHeap->GetGPUDescriptorHandleForHeapStart());
+		UINT uavHandleSize = deviceResources->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-	D3D12_ROOT_SIGNATURE_FLAGS rootSignatureFlags = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+		CD3DX12_CPU_DESCRIPTOR_HANDLE rgbUavCpu(deviceResources->uavHeap->GetCPUDescriptorHandleForHeapStart(), 0 * uavHandleSize);
+		CD3DX12_CPU_DESCRIPTOR_HANDLE yuvLuminanceUavCpu(deviceResources->uavHeap->GetCPUDescriptorHandleForHeapStart(), 1 * uavHandleSize);
+		CD3DX12_CPU_DESCRIPTOR_HANDLE yuvChrominanceUavCpu(deviceResources->uavHeap->GetCPUDescriptorHandleForHeapStart(), 2 * uavHandleSize);
 
-	CD3DX12_ROOT_SIGNATURE_DESC descRootSignature;
-	descRootSignature.Init(1, &parameter, 0, nullptr, rootSignatureFlags);
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+			uavDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; // Rgb source
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			deviceResources->device->CreateUnorderedAccessView(rgb, nullptr, &uavDesc, rgbUavCpu);
+		}
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+			uavDesc.Format = DXGI_FORMAT_R8_UNORM; // Selects the luminance plane
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			deviceResources->device->CreateUnorderedAccessView(yuv, nullptr, &uavDesc, yuvLuminanceUavCpu);
+		}
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+			uavDesc.Format = DXGI_FORMAT_R8G8_UNORM; // Selects the chrominance plane
+			uavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+			uavDesc.Texture2D.PlaneSlice = 1;
+			deviceResources->device->CreateUnorderedAccessView(yuv, nullptr, &uavDesc, yuvChrominanceUavCpu);
+		}
 
-	ComPtr<ID3DBlob> pSignature;
-	ComPtr<ID3DBlob> pError;
-	DX::ThrowIfFailed(D3D12SerializeRootSignature(&descRootSignature, D3D_ROOT_SIGNATURE_VERSION_1, pSignature.GetAddressOf(), pError.GetAddressOf()));
-	DX::ThrowIfFailed(deviceResources->device->CreateRootSignature(0, pSignature->GetBufferPointer(), pSignature->GetBufferSize(), IID_PPV_ARGS(&deviceResources->computeRootSignature)));
+		CD3DX12_DESCRIPTOR_RANGE ranges[1];
+		CD3DX12_ROOT_PARAMETER parameter;
 
-	D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineStateDesc{};
-	pipelineStateDesc.pRootSignature = deviceResources->computeRootSignature.Get();
-	pipelineStateDesc.CS = CD3DX12_SHADER_BYTECODE((void*)(g_rgbToYuvCS), _countof(g_rgbToYuvCS));
-	DX::ThrowIfFailed(deviceResources->device->CreateComputePipelineState(&pipelineStateDesc, IID_PPV_ARGS(&deviceResources->computePipelineState)));
+		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0);
 
-	// Do render for format conversion
-	deviceResources->graphicsCommandList->SetComputeRootSignature(deviceResources->computeRootSignature.Get());
-	deviceResources->graphicsCommandList->SetPipelineState(deviceResources->computePipelineState.Get());
-	ID3D12DescriptorHeap* heaps[] = { deviceResources->uavHeap.Get() };
-	deviceResources->graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
-	CD3DX12_GPU_DESCRIPTOR_HANDLE unorderedAccessViewGpu(deviceResources->uavHeap->GetGPUDescriptorHandleForHeapStart());
-	deviceResources->graphicsCommandList->SetComputeRootDescriptorTable(0, unorderedAccessViewGpu);
-	deviceResources->graphicsCommandList->Dispatch(loadedImageResourceDesc.Width, loadedImageResourceDesc.Height, 1);
-}
+		parameter.InitAsDescriptorTable(_countof(ranges), ranges, D3D12_SHADER_VISIBILITY_ALL);
+
+		D3D12_ROOT_SIGNATURE_FLAGS rootSignatureFlags = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
+
+		CD3DX12_ROOT_SIGNATURE_DESC descRootSignature;
+		descRootSignature.Init(1, &parameter, 0, nullptr, rootSignatureFlags);
+
+		ComPtr<ID3DBlob> pSignature;
+		ComPtr<ID3DBlob> pError;
+		DX::ThrowIfFailed(D3D12SerializeRootSignature(&descRootSignature, D3D_ROOT_SIGNATURE_VERSION_1, pSignature.GetAddressOf(), pError.GetAddressOf()));
+		DX::ThrowIfFailed(deviceResources->device->CreateRootSignature(0, pSignature->GetBufferPointer(), pSignature->GetBufferSize(), IID_PPV_ARGS(&deviceResources->computeRootSignature)));
+
+		D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineStateDesc{};
+		pipelineStateDesc.pRootSignature = deviceResources->computeRootSignature.Get();
+		pipelineStateDesc.CS = CD3DX12_SHADER_BYTECODE((void*)(g_rgbToYuvCS), _countof(g_rgbToYuvCS));
+		DX::ThrowIfFailed(deviceResources->device->CreateComputePipelineState(&pipelineStateDesc, IID_PPV_ARGS(&deviceResources->computePipelineState)));
+
+		// Do render for format conversion
+		deviceResources->graphicsCommandList->SetComputeRootSignature(deviceResources->computeRootSignature.Get());
+		deviceResources->graphicsCommandList->SetPipelineState(deviceResources->computePipelineState.Get());
+		ID3D12DescriptorHeap* heaps[] = { deviceResources->uavHeap.Get() };
+		deviceResources->graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+		CD3DX12_GPU_DESCRIPTOR_HANDLE unorderedAccessViewGpu(deviceResources->uavHeap->GetGPUDescriptorHandleForHeapStart());
+		deviceResources->graphicsCommandList->SetComputeRootDescriptorTable(0, unorderedAccessViewGpu);
+		deviceResources->graphicsCommandList->Dispatch(loadedImageResourceDesc.Width, loadedImageResourceDesc.Height, 1);
+	}
+};
+
 
 int main()
 {
@@ -372,8 +383,8 @@ int main()
 	deviceResources.Initialize();
 
 	// Load source image
-	TextureLoader textureLoader;
-	ComPtr<ID3D12Resource> resource = textureLoader.LoadTextureFromPngFile(L"lcm.png", D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
+	RgbTextureLoader textureLoader;
+	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(L"lcm.png", D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
 	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
 
 	// Do format conversion
@@ -381,7 +392,9 @@ int main()
 	if (graphicsAnalysis)
 		graphicsAnalysis->BeginCapture();
 
-	DoConversion(resource.Get(), &deviceResources);
+	RgbToYuvConverter converter;
+	ComPtr<ID3D12Resource> yuv = converter.CreateCompatibleYuvResource(rgb.Get(), deviceResources.device.Get());
+	converter.DoConversion(rgb.Get(), yuv.Get(), &deviceResources);
 	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
 
 	if (graphicsAnalysis)
