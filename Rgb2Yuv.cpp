@@ -364,8 +364,16 @@ ComPtr<ID3D12Resource> CreateCompatibleYuvResource(ID3D12Resource* rgb, ID3D12De
 
 	D3D12_RESOURCE_DESC resourceDesc{};
 	resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+
+	// NV12 needs to have multiple-of-two size.
 	resourceDesc.Width = loadedImageResourceDesc.Width;
+	if (resourceDesc.Width % 2 != 0)
+		++resourceDesc.Width;
+
 	resourceDesc.Height = loadedImageResourceDesc.Height;
+	if (resourceDesc.Height % 2 != 0)
+		++resourceDesc.Height;
+
 	resourceDesc.MipLevels = 1;
 	resourceDesc.DepthOrArraySize = 1;
 	resourceDesc.Format = DXGI_FORMAT_NV12;
