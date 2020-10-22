@@ -208,38 +208,37 @@ ComPtr<ID3D12Device> CreateDevice()
 	return device;
 }
 
-struct DeviceResources
+struct QueueWrapper
 {
-	ComPtr<ID3D12Device> device;
-	ComPtr<ID3D12CommandAllocator> commandAllocator;
+	ComPtr<ID3D12Fence> m_fence;
+	UINT m_fenceValue;
+	HANDLE m_fenceEvent;
+
+	ComPtr<ID3D12CommandAllocator> m_commandAllocator;
+	ComPtr<ID3D12CommandQueue> m_graphicsCommandQueue;
+
+public:
 	ComPtr<ID3D12GraphicsCommandList> graphicsCommandList;
-	ComPtr<ID3D12CommandQueue> graphicsCommandQueue;
 
-	ComPtr<ID3D12Fence> fence;
-	UINT fenceValue;
-	HANDLE fenceEvent;
-
-	void Initialize()
+	void Initialize(ID3D12Device* device)
 	{
-		device = CreateDevice();
-
-		DX::ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&commandAllocator)));
+		DX::ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
 
 		{
 			D3D12_COMMAND_QUEUE_DESC queueDesc = {};
 			queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
 			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-			DX::ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&graphicsCommandQueue)));
-			NAME_D3D12_OBJECT(graphicsCommandQueue);
+			DX::ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_graphicsCommandQueue)));
+			NAME_D3D12_OBJECT(m_graphicsCommandQueue);
 		}
 
-		DX::ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, commandAllocator.Get(), nullptr, IID_PPV_ARGS(&graphicsCommandList)));
+		DX::ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), nullptr, IID_PPV_ARGS(&graphicsCommandList)));
 		NAME_D3D12_OBJECT(graphicsCommandList);
 
-		DX::ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)));
-		fenceValue = 0;
-		fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		if (fenceEvent == nullptr)
+		DX::ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+		m_fenceValue = 0;
+		m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+		if (m_fenceEvent == nullptr)
 		{
 			DX::ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
 		}
@@ -250,20 +249,20 @@ struct DeviceResources
 		DX::ThrowIfFailed(graphicsCommandList->Close());
 
 		ID3D12CommandList* commandLists[] = { graphicsCommandList.Get() };
-		graphicsCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+		m_graphicsCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
 
-		++fenceValue;
+		++m_fenceValue;
 
-		DX::ThrowIfFailed(graphicsCommandQueue->Signal(fence.Get(), fenceValue));
+		DX::ThrowIfFailed(m_graphicsCommandQueue->Signal(m_fence.Get(), m_fenceValue));
 
-		if (fence->GetCompletedValue() < fenceValue)
+		if (m_fence->GetCompletedValue() < m_fenceValue)
 		{
-			DX::ThrowIfFailed(fence->SetEventOnCompletion(fenceValue, fenceEvent));
-			WaitForSingleObjectEx(fenceEvent, INFINITE, FALSE);
+			DX::ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent));
+			WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
 		}
 
-		DX::ThrowIfFailed(commandAllocator->Reset());
-		DX::ThrowIfFailed(graphicsCommandList->Reset(commandAllocator.Get(), nullptr));
+		DX::ThrowIfFailed(m_commandAllocator->Reset());
+		DX::ThrowIfFailed(graphicsCommandList->Reset(m_commandAllocator.Get(), nullptr));
 	}
 };
 
@@ -395,34 +394,29 @@ ComPtr<ID3D12Resource> CreateCompatibleYuvResource(ID3D12Resource* rgb, ID3D12De
 	return result;
 }
 
-class RgbToYuvConverter
+void ConvertRgbToYuv(
+	ID3D12Resource* yuv,
+	QueueWrapper const& deviceResources,
+	DescriptorHeapWrapper* cbvSrvUav,
+	RootSignatureWrapper* rootSig,
+	PipelineStateWrapper* pipelineState)
 {
-public:
+	D3D12_RESOURCE_DESC targetResourceDesc = yuv->GetDesc();
 
-	void DoConversion(
-		ID3D12Resource* yuv,
-		DeviceResources* deviceResources, 
-		DescriptorHeapWrapper* cbvSrvUav,
-		RootSignatureWrapper* rootSig,
-		PipelineStateWrapper* pipelineState)
-	{
-		D3D12_RESOURCE_DESC targetResourceDesc = yuv->GetDesc();
+	// Run compute for format conversion
+	deviceResources.graphicsCommandList->SetComputeRootSignature(rootSig->m_computeRootSignature.Get());
+	deviceResources.graphicsCommandList->SetPipelineState(pipelineState->m_computePipelineState.Get());
+	ID3D12DescriptorHeap* heaps[] = { cbvSrvUav->m_cbvSrvUavHeap.Get() };
+	deviceResources.graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
 
-		// Run compute for format conversion
-		deviceResources->graphicsCommandList->SetComputeRootSignature(rootSig->m_computeRootSignature.Get());
-		deviceResources->graphicsCommandList->SetPipelineState(pipelineState->m_computePipelineState.Get());
-		ID3D12DescriptorHeap* heaps[] = { cbvSrvUav->m_cbvSrvUavHeap.Get() };
-		deviceResources->graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+	deviceResources.graphicsCommandList->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
+	UINT rootConstants[2] = { static_cast<UINT>(targetResourceDesc.Width), targetResourceDesc.Height };
+	deviceResources.graphicsCommandList->SetComputeRoot32BitConstants(1, 2, rootConstants, 0);
 
-		deviceResources->graphicsCommandList->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
-		UINT rootConstants[2] = { static_cast<UINT>(targetResourceDesc.Width), targetResourceDesc.Height};
-		deviceResources->graphicsCommandList->SetComputeRoot32BitConstants(1, 2, rootConstants, 0);
-
-		UINT dispatchX = static_cast<UINT>(targetResourceDesc.Width) / 64 + 1;
-		UINT dispatchY = targetResourceDesc.Height;
-		deviceResources->graphicsCommandList->Dispatch(dispatchX, dispatchY, 1);
-	}
-};
+	UINT dispatchX = static_cast<UINT>(targetResourceDesc.Width) / 64 + 1;
+	UINT dispatchY = targetResourceDesc.Height;
+	deviceResources.graphicsCommandList->Dispatch(dispatchX, dispatchY, 1);
+}
 
 void PrintUsage()
 {
@@ -444,32 +438,33 @@ int main(int argc, void** argv)
 	ComPtr<IDXGraphicsAnalysis> graphicsAnalysis;
 	DXGIGetDebugInterface1(0, IID_PPV_ARGS(&graphicsAnalysis));
 
-	DeviceResources deviceResources;
-	deviceResources.Initialize();
+	ComPtr<ID3D12Device> device = CreateDevice();
+
+	QueueWrapper queueWrapper;
+	queueWrapper.Initialize(device.Get());
 
 	// Load source image
 	RgbTextureLoader textureLoader;
-	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(imageFileName.c_str(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
-	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
+	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(imageFileName.c_str(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, device.Get(), queueWrapper.graphicsCommandList.Get());
+	queueWrapper.CloseCommandListExecuteAndWaitUntilDone();
 
 	// Do format conversion
 	if (graphicsAnalysis)
 		graphicsAnalysis->BeginCapture();
 
-	RgbToYuvConverter converter;
-	ComPtr<ID3D12Resource> yuv = CreateCompatibleYuvResource(rgb.Get(), deviceResources.device.Get());
+	ComPtr<ID3D12Resource> yuv = CreateCompatibleYuvResource(rgb.Get(), device.Get());
 
 	DescriptorHeapWrapper cbvSrvUav;
-	cbvSrvUav.Initialize(rgb.Get(), yuv.Get(), deviceResources.device.Get());
+	cbvSrvUav.Initialize(rgb.Get(), yuv.Get(), device.Get());
 
 	RootSignatureWrapper rootSignature;
-	rootSignature.Initialize(&cbvSrvUav, deviceResources.device.Get());
+	rootSignature.Initialize(&cbvSrvUav, device.Get());
 
 	PipelineStateWrapper pipelineState;
-	pipelineState.Initialize(rootSignature.m_computeRootSignature.Get(), deviceResources.device.Get());
+	pipelineState.Initialize(rootSignature.m_computeRootSignature.Get(), device.Get());
 
-	converter.DoConversion(yuv.Get(), &deviceResources, &cbvSrvUav, &rootSignature, &pipelineState);
-	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
+	ConvertRgbToYuv(yuv.Get(), queueWrapper, &cbvSrvUav, &rootSignature, &pipelineState);
+	queueWrapper.CloseCommandListExecuteAndWaitUntilDone();
 
 	if (graphicsAnalysis)
 		graphicsAnalysis->EndCapture();
