@@ -326,16 +326,17 @@ struct RootSignatureWrapper
 	void Initialize(DescriptorHeapWrapper* cbvSrvUav, ID3D12Device* device)
 	{
 		CD3DX12_DESCRIPTOR_RANGE ranges[1];
-		CD3DX12_ROOT_PARAMETER parameter;
+		CD3DX12_ROOT_PARAMETER parameters[2];
 
 		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, cbvSrvUav->m_descriptorCount, 0);
 
-		parameter.InitAsDescriptorTable(_countof(ranges), ranges, D3D12_SHADER_VISIBILITY_ALL);
+		parameters[0].InitAsDescriptorTable(_countof(ranges), ranges);
+		parameters[1].InitAsConstants(2, 0);
 
 		D3D12_ROOT_SIGNATURE_FLAGS rootSignatureFlags = D3D12_ROOT_SIGNATURE_FLAG_DENY_VERTEX_SHADER_ROOT_ACCESS;
 
 		CD3DX12_ROOT_SIGNATURE_DESC descRootSignature;
-		descRootSignature.Init(1, &parameter, 0, nullptr, rootSignatureFlags);
+		descRootSignature.Init(_countof(parameters), parameters, 0, nullptr, rootSignatureFlags);
 
 		ComPtr<ID3DBlob> pSignature;
 		ComPtr<ID3DBlob> pError;
@@ -389,6 +390,7 @@ ComPtr<ID3D12Resource> CreateCompatibleYuvResource(ID3D12Resource* rgb, ID3D12De
 		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
 		nullptr,
 		IID_PPV_ARGS(&result)));
+	DX::SetName(result.Get(), L"compatibleYUV");
 
 	return result;
 }
@@ -398,23 +400,26 @@ class RgbToYuvConverter
 public:
 
 	void DoConversion(
-		ID3D12Resource* rgb, 
+		ID3D12Resource* yuv,
 		DeviceResources* deviceResources, 
 		DescriptorHeapWrapper* cbvSrvUav,
 		RootSignatureWrapper* rootSig,
 		PipelineStateWrapper* pipelineState)
 	{
-		D3D12_RESOURCE_DESC loadedImageResourceDesc = rgb->GetDesc();
+		D3D12_RESOURCE_DESC targetResourceDesc = yuv->GetDesc();
 
 		// Run compute for format conversion
 		deviceResources->graphicsCommandList->SetComputeRootSignature(rootSig->m_computeRootSignature.Get());
 		deviceResources->graphicsCommandList->SetPipelineState(pipelineState->m_computePipelineState.Get());
 		ID3D12DescriptorHeap* heaps[] = { cbvSrvUav->m_cbvSrvUavHeap.Get() };
 		deviceResources->graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
-		deviceResources->graphicsCommandList->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
 
-		UINT dispatchX = static_cast<UINT>(loadedImageResourceDesc.Width) / 64 + 1;
-		UINT dispatchY = loadedImageResourceDesc.Height;
+		deviceResources->graphicsCommandList->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
+		UINT rootConstants[2] = { static_cast<UINT>(targetResourceDesc.Width), targetResourceDesc.Height};
+		deviceResources->graphicsCommandList->SetComputeRoot32BitConstants(1, 2, rootConstants, 0);
+
+		UINT dispatchX = static_cast<UINT>(targetResourceDesc.Width) / 64 + 1;
+		UINT dispatchY = targetResourceDesc.Height;
 		deviceResources->graphicsCommandList->Dispatch(dispatchX, dispatchY, 1);
 	}
 };
@@ -450,7 +455,7 @@ int main()
 	PipelineStateWrapper pipelineState;
 	pipelineState.Initialize(rootSignature.m_computeRootSignature.Get(), deviceResources.device.Get());
 
-	converter.DoConversion(rgb.Get(), &deviceResources, &cbvSrvUav, &rootSignature, &pipelineState);
+	converter.DoConversion(yuv.Get(), &deviceResources, &cbvSrvUav, &rootSignature, &pipelineState);
 	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
 
 	if (graphicsAnalysis)

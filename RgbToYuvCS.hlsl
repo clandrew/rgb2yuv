@@ -2,18 +2,17 @@ RWTexture2D<float4> rgb : register(u0);
 RWTexture2D<float> yuv_luminance : register(u1);
 RWTexture2D<float2> yuv_chrominance : register(u2);
 
+uint2 imageSize : register(b0);
+
 void OutputY(uint3 groupID, uint3 threadID)
 {
     int srcX = (groupID.x * 64) + threadID.x;
     int srcY = groupID.y;
 
-    int imageWidth = 174;
-    int imageHeight = 144;
-
-    if (srcX >= imageWidth)
+    if (srcX >= imageSize.x)
         return;
 
-    if (srcY >= imageHeight)
+    if (srcY >= imageSize.y)
         return;
 
     int2 srcCoord = int2(srcX, srcY);
@@ -38,13 +37,10 @@ void OutputUV(uint3 groupID, uint3 threadID)
     int ql = (groupID.x * 128) + (threadID.x * 2); // quad left
     int qt = (groupID.y * 2); // quad top
 
-    int imageWidth = 174;
-    int imageHeight = 144;
-
-    if (ql >= imageWidth)
+    if (ql >= imageSize.x)
         return;
 
-    if (qt >= imageHeight)
+    if (qt >= imageSize.y)
         return;
 
     int2 src0 = int2(ql + 0, qt + 0); // top left
