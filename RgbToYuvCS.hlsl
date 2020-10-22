@@ -36,7 +36,7 @@ void OutputY(uint3 groupID, uint3 threadID)
 void OutputUV(uint3 groupID, uint3 threadID)
 {
     int ql = (groupID.x * 128) + (threadID.x * 2); // quad left
-    int qt = groupID.y; // quad top
+    int qt = (groupID.y * 2); // quad top
 
     int imageWidth = 174;
     int imageHeight = 144;
@@ -77,7 +77,7 @@ void OutputUV(uint3 groupID, uint3 threadID)
 }
 
 [numthreads(64, 1, 1)]
-void main( uint3 groupID : SV_GroupID, uint3 threadID : SV_DispatchThreadID )
+void main( uint3 groupID : SV_GroupID, uint3 threadID : SV_GroupThreadID )
 {
     OutputY(groupID, threadID);
 
