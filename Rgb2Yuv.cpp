@@ -424,9 +424,23 @@ public:
 	}
 };
 
-
-int main()
+void PrintUsage()
 {
+	std::cout << "Usage: Rgb2Yuv.exe [sourceImageFile]\n";
+}
+
+int main(int argc, void** argv)
+{
+	if (argc != 2)
+	{
+		PrintUsage();
+		return -1;
+	}
+
+	void* arg1 = argv[1];
+	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> textConverter;
+	std::wstring imageFileName = textConverter.from_bytes((char*)arg1);
+
 	ComPtr<IDXGraphicsAnalysis> graphicsAnalysis;
 	DXGIGetDebugInterface1(0, IID_PPV_ARGS(&graphicsAnalysis));
 
@@ -435,11 +449,10 @@ int main()
 
 	// Load source image
 	RgbTextureLoader textureLoader;
-	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(L"m.png", D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
+	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(imageFileName.c_str(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
 	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
 
 	// Do format conversion
-
 	if (graphicsAnalysis)
 		graphicsAnalysis->BeginCapture();
 
@@ -460,6 +473,4 @@ int main()
 
 	if (graphicsAnalysis)
 		graphicsAnalysis->EndCapture();
-
-    // Verify w PIX
 }

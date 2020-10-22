@@ -20,6 +20,9 @@
 
 #include <string>
 #include <vector>
+#include <iostream>
+#include <locale>
+#include <codecvt>
 
 using namespace Microsoft::WRL;
 
