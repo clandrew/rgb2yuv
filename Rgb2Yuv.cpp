@@ -396,7 +396,7 @@ ComPtr<ID3D12Resource> CreateCompatibleYuvResource(ID3D12Resource* rgb, ID3D12De
 
 void ConvertRgbToYuv(
 	ID3D12Resource* yuv,
-	QueueWrapper const& deviceResources,
+	ID3D12GraphicsCommandList* cl,
 	DescriptorHeapWrapper* cbvSrvUav,
 	RootSignatureWrapper* rootSig,
 	PipelineStateWrapper* pipelineState)
@@ -404,18 +404,18 @@ void ConvertRgbToYuv(
 	D3D12_RESOURCE_DESC targetResourceDesc = yuv->GetDesc();
 
 	// Run compute for format conversion
-	deviceResources.graphicsCommandList->SetComputeRootSignature(rootSig->m_computeRootSignature.Get());
-	deviceResources.graphicsCommandList->SetPipelineState(pipelineState->m_computePipelineState.Get());
+	cl->SetComputeRootSignature(rootSig->m_computeRootSignature.Get());
+	cl->SetPipelineState(pipelineState->m_computePipelineState.Get());
 	ID3D12DescriptorHeap* heaps[] = { cbvSrvUav->m_cbvSrvUavHeap.Get() };
-	deviceResources.graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
+	cl->SetDescriptorHeaps(_countof(heaps), heaps);
 
-	deviceResources.graphicsCommandList->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
+	cl->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
 	UINT rootConstants[2] = { static_cast<UINT>(targetResourceDesc.Width), targetResourceDesc.Height };
-	deviceResources.graphicsCommandList->SetComputeRoot32BitConstants(1, 2, rootConstants, 0);
+	cl->SetComputeRoot32BitConstants(1, 2, rootConstants, 0);
 
 	UINT dispatchX = static_cast<UINT>(targetResourceDesc.Width) / 64 + 1;
 	UINT dispatchY = targetResourceDesc.Height;
-	deviceResources.graphicsCommandList->Dispatch(dispatchX, dispatchY, 1);
+	cl->Dispatch(dispatchX, dispatchY, 1);
 }
 
 void PrintUsage()
@@ -463,7 +463,7 @@ int main(int argc, void** argv)
 	PipelineStateWrapper pipelineState;
 	pipelineState.Initialize(rootSignature.m_computeRootSignature.Get(), device.Get());
 
-	ConvertRgbToYuv(yuv.Get(), queueWrapper, &cbvSrvUav, &rootSignature, &pipelineState);
+	ConvertRgbToYuv(yuv.Get(), queueWrapper.graphicsCommandList.Get(), &cbvSrvUav, &rootSignature, &pipelineState);
 	queueWrapper.CloseCommandListExecuteAndWaitUntilDone();
 
 	if (graphicsAnalysis)
