@@ -430,7 +430,7 @@ int main()
 
 	// Load source image
 	RgbTextureLoader textureLoader;
-	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(L"lcm.png", D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
+	ComPtr<ID3D12Resource> rgb = textureLoader.LoadTextureFromPngFile(L"m.png", D3D12_RESOURCE_STATE_UNORDERED_ACCESS, deviceResources.device.Get(), deviceResources.graphicsCommandList.Get());
 	deviceResources.CloseCommandListExecuteAndWaitUntilDone();
 
 	// Do format conversion
