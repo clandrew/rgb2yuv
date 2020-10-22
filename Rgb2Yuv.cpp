@@ -412,7 +412,10 @@ public:
 		ID3D12DescriptorHeap* heaps[] = { cbvSrvUav->m_cbvSrvUavHeap.Get() };
 		deviceResources->graphicsCommandList->SetDescriptorHeaps(_countof(heaps), heaps);
 		deviceResources->graphicsCommandList->SetComputeRootDescriptorTable(0, cbvSrvUav->m_cbvSrvUavGpu);
-		deviceResources->graphicsCommandList->Dispatch(static_cast<UINT>(loadedImageResourceDesc.Width), loadedImageResourceDesc.Height, 1);
+
+		UINT dispatchX = static_cast<UINT>(loadedImageResourceDesc.Width) / 64 + 1;
+		UINT dispatchY = loadedImageResourceDesc.Height;
+		deviceResources->graphicsCommandList->Dispatch(dispatchX, dispatchY, 1);
 	}
 };
 
