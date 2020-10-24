@@ -468,4 +468,6 @@ int main(int argc, void** argv)
 
 	if (graphicsAnalysis)
 		graphicsAnalysis->EndCapture();
+
+	return 0;
 }
