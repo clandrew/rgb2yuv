@@ -38,6 +38,65 @@ interface DECLSPEC_UUID("9f251514-9d4d-4902-9d60-18988ab7d4b5") DECLSPEC_NOVTABL
 	STDMETHOD_(void, EndCapture)() PURE;
 };
 
+
+struct QueueWrapper
+{
+	ComPtr<ID3D12Fence> m_fence;
+	UINT m_fenceValue;
+	HANDLE m_fenceEvent;
+
+	ComPtr<ID3D12CommandAllocator> m_commandAllocator;
+	ComPtr<ID3D12CommandQueue> m_graphicsCommandQueue;
+
+public:
+	ComPtr<ID3D12GraphicsCommandList> graphicsCommandList;
+
+	void Initialize(ID3D12Device* device)
+	{
+		DX::ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
+
+		{
+			D3D12_COMMAND_QUEUE_DESC queueDesc = {};
+			queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+			DX::ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_graphicsCommandQueue)));
+			NAME_D3D12_OBJECT(m_graphicsCommandQueue);
+		}
+
+		DX::ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), nullptr, IID_PPV_ARGS(&graphicsCommandList)));
+		NAME_D3D12_OBJECT(graphicsCommandList);
+
+		DX::ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+		m_fenceValue = 0;
+		m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+		if (m_fenceEvent == nullptr)
+		{
+			DX::ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
+		}
+	}
+
+	void CloseCommandListExecuteAndWaitUntilDone()
+	{
+		DX::ThrowIfFailed(graphicsCommandList->Close());
+
+		ID3D12CommandList* commandLists[] = { graphicsCommandList.Get() };
+		m_graphicsCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+
+		++m_fenceValue;
+
+		DX::ThrowIfFailed(m_graphicsCommandQueue->Signal(m_fence.Get(), m_fenceValue));
+
+		if (m_fence->GetCompletedValue() < m_fenceValue)
+		{
+			DX::ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent));
+			WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
+		}
+
+		DX::ThrowIfFailed(m_commandAllocator->Reset());
+		DX::ThrowIfFailed(graphicsCommandList->Reset(m_commandAllocator.Get(), nullptr));
+	}
+};
+
 class RgbTextureLoader
 {
 	ComPtr<IWICImagingFactory> m_wicImagingFactory;
@@ -149,6 +208,224 @@ public:
 
 		return result;
 	}
+		
+	void SaveTextureToPngFile(
+		ID3D12Resource* texture,
+		D3D12_RESOURCE_STATES preState,
+		D3D12_RESOURCE_STATES postState,
+		std::wstring const& fileName,
+		ID3D12Device* device,
+		QueueWrapper* directQueueWrapper)
+	{
+		assert(false); // TODO: fix implementation
+
+		ComPtr<ID3D12Resource> download;
+
+		UINT64 footprintRowPitch = 0;
+		{
+			// Texture needs to be in copy source
+			if (preState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+			{
+				CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(texture, preState, D3D12_RESOURCE_STATE_COPY_SOURCE);
+				directQueueWrapper->graphicsCommandList->ResourceBarrier(1, &b);
+			}
+
+			D3D12_RESOURCE_DESC upscaledRgbDesc = texture->GetDesc();
+
+			UINT64 totalResourceSize = 0;
+			UINT fpRowCount = 0;
+
+			device->GetCopyableFootprints(
+				&upscaledRgbDesc,
+				0,
+				1,
+				0,
+				nullptr,
+				&fpRowCount,
+				&footprintRowPitch,
+				&totalResourceSize);
+			UINT alignedFootprintRowPitch = AlignTo256(footprintRowPitch);
+
+			auto readbackHeapType = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+			int bufferRowPitch = AlignTo256(static_cast<UINT>(upscaledRgbDesc.Width) * 2); // Required for NV12
+			int bufferSize = AlignTo256(bufferRowPitch * upscaledRgbDesc.Height * 2);
+			auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(bufferSize);
+			DX::ThrowIfFailed(device->CreateCommittedResource(
+				&readbackHeapType,
+				D3D12_HEAP_FLAG_NONE,
+				&bufferDesc,
+				D3D12_RESOURCE_STATE_COPY_DEST,
+				nullptr,
+				IID_PPV_ARGS(&download)));
+
+			D3D12_PLACED_SUBRESOURCE_FOOTPRINT downloadFootprint = {};
+			downloadFootprint.Footprint.Width = static_cast<UINT>(upscaledRgbDesc.Width);
+			downloadFootprint.Footprint.Height = upscaledRgbDesc.Height;
+			downloadFootprint.Footprint.Depth = 1;
+			downloadFootprint.Footprint.RowPitch = AlignTo256(static_cast<UINT>(upscaledRgbDesc.Width) * 2);
+
+			downloadFootprint.Footprint.Format = DXGI_FORMAT_R8_TYPELESS;
+
+			CD3DX12_TEXTURE_COPY_LOCATION copyDest(download.Get(), downloadFootprint);
+			CD3DX12_TEXTURE_COPY_LOCATION copySrc(texture, 0);
+
+			directQueueWrapper->graphicsCommandList->CopyTextureRegion(&copyDest, 0, 0, 0, &copySrc, nullptr);
+
+			// Texture needs to be in copy source
+			if (postState != D3D12_RESOURCE_STATE_COPY_SOURCE)
+			{
+				CD3DX12_RESOURCE_BARRIER b = CD3DX12_RESOURCE_BARRIER::Transition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE, postState);
+				directQueueWrapper->graphicsCommandList->ResourceBarrier(1, &b);
+			}
+		}
+		directQueueWrapper->CloseCommandListExecuteAndWaitUntilDone();
+
+		D3D12_RESOURCE_DESC desc = texture->GetDesc();
+
+		ComPtr<IWICBitmapEncoder> encoder;
+		if (FAILED(m_wicImagingFactory->CreateEncoder(GUID_ContainerFormatPng, NULL, &encoder)))
+		{
+			return;
+		}
+
+		ComPtr<IWICStream> stream;
+		if (FAILED(m_wicImagingFactory->CreateStream(&stream)))
+		{
+			return;
+		}
+
+		if (FAILED(stream->InitializeFromFilename(fileName.c_str(), GENERIC_WRITE)))
+		{
+			return;
+		}
+
+		if (FAILED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)))
+		{
+			return;
+		}
+
+		// Put all the pixels in bitmap
+
+		ComPtr<IWICBitmapFrameEncode> frameEncode;
+		if (FAILED(encoder->CreateNewFrame(&frameEncode, nullptr)))
+		{
+			return;
+		}
+
+		if (FAILED(frameEncode->Initialize(nullptr)))
+		{
+			return;
+		}
+		if (FAILED(frameEncode->SetSize(desc.Width, desc.Height)))
+		{
+			return;
+		}
+
+		if (FAILED(frameEncode->SetResolution(96, 96)))
+		{
+			return;
+		}
+
+		WICPixelFormatGUID pixelFormat = GUID_WICPixelFormat32bppPBGRA;
+		if (FAILED(frameEncode->SetPixelFormat(&pixelFormat)))
+		{
+			return;
+		}
+
+		ComPtr<IWICBitmap> wicBitmap;
+		if (FAILED(m_wicImagingFactory->CreateBitmap(
+			desc.Width,
+			desc.Height,
+			GUID_WICPixelFormat32bppPBGRA,
+			WICBitmapCacheOnDemand,
+			&wicBitmap)))
+		{
+			return;
+		}
+		
+		// Here: Lock resource and put it in the bitmap
+		{
+			WICRect lockRect{};
+			lockRect.Width = desc.Width;
+			lockRect.Height = desc.Height;
+
+			ComPtr<IWICBitmapLock> wicBitmapLock;
+			if (FAILED(wicBitmap->Lock(&lockRect, WICBitmapLockWrite, &wicBitmapLock)))
+			{
+				return;
+			}
+
+			UINT wicBitmapStride{};
+			if (FAILED(wicBitmapLock->GetStride(&wicBitmapStride)))
+			{
+				return;
+			}
+
+			UINT bufferSize;
+			byte* wicBitmapData;
+			if (FAILED(wicBitmapLock->GetDataPointer(&bufferSize, &wicBitmapData)))
+			{
+				return;
+			}
+
+			size_t imageSizeInBytes = footprintRowPitch * UINT64(desc.Height);
+			void* mappedMemory = nullptr;
+			D3D12_RANGE readRange = { 0, static_cast<SIZE_T>(imageSizeInBytes) };
+			if (FAILED(download->Map(0, &readRange, &mappedMemory)))
+			{
+				return;
+			}
+
+			byte* src = static_cast<byte*>(mappedMemory);
+			byte* dst = wicBitmapData;
+
+			for (int y = 0; y < desc.Height; ++y)
+			{
+				memcpy(dst, src, desc.Width * 4);
+				src += footprintRowPitch;
+				dst += wicBitmapStride;
+			}
+
+			download->Unmap(0, nullptr);
+		}
+
+
+		if (FAILED(frameEncode->WriteSource(
+			wicBitmap.Get(),
+			NULL)))
+		{
+			return;
+		}
+
+		if (FAILED(frameEncode->Commit()))
+		{
+			return;
+		}
+		if (FAILED(encoder->Commit()))
+		{
+			return;
+		}
+
+		if (FAILED(stream->Commit(STGC_DEFAULT)))
+		{
+			return;
+		}
+
+	}
+
+	private:
+
+		int AlignTo256(int i)
+		{
+			if ((i % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT) != 0)
+			{
+				i += D3D12_TEXTURE_DATA_PITCH_ALIGNMENT - (i % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+			}
+			else
+			{
+				return i;
+			}
+		}
 };
 
 ComPtr<IDXGIAdapter1> GetHardwareAdapter(IDXGIFactory4* dxgiFactory)
@@ -210,65 +487,6 @@ ComPtr<ID3D12Device> CreateDevice()
 
 	return device;
 }
-
-struct QueueWrapper
-{
-	ComPtr<ID3D12Fence> m_fence;
-	UINT m_fenceValue;
-	HANDLE m_fenceEvent;
-
-	ComPtr<ID3D12CommandAllocator> m_commandAllocator;
-	ComPtr<ID3D12CommandQueue> m_graphicsCommandQueue;
-
-public:
-	ComPtr<ID3D12GraphicsCommandList> graphicsCommandList;
-
-	void Initialize(ID3D12Device* device)
-	{
-		DX::ThrowIfFailed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator)));
-
-		{
-			D3D12_COMMAND_QUEUE_DESC queueDesc = {};
-			queueDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-			queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-			DX::ThrowIfFailed(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_graphicsCommandQueue)));
-			NAME_D3D12_OBJECT(m_graphicsCommandQueue);
-		}
-
-		DX::ThrowIfFailed(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), nullptr, IID_PPV_ARGS(&graphicsCommandList)));
-		NAME_D3D12_OBJECT(graphicsCommandList);
-
-		DX::ThrowIfFailed(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
-		m_fenceValue = 0;
-		m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-		if (m_fenceEvent == nullptr)
-		{
-			DX::ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
-		}
-	}
-
-	void CloseCommandListExecuteAndWaitUntilDone()
-	{
-		DX::ThrowIfFailed(graphicsCommandList->Close());
-
-		ID3D12CommandList* commandLists[] = { graphicsCommandList.Get() };
-		m_graphicsCommandQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
-
-		++m_fenceValue;
-
-		DX::ThrowIfFailed(m_graphicsCommandQueue->Signal(m_fence.Get(), m_fenceValue));
-
-		if (m_fence->GetCompletedValue() < m_fenceValue)
-		{
-			DX::ThrowIfFailed(m_fence->SetEventOnCompletion(m_fenceValue, m_fenceEvent));
-			WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
-		}
-
-		DX::ThrowIfFailed(m_commandAllocator->Reset());
-		DX::ThrowIfFailed(graphicsCommandList->Reset(m_commandAllocator.Get(), nullptr));
-	}
-};
-
 
 struct DescriptorHeapWrapper
 {
@@ -469,6 +687,14 @@ int main(int argc, void** argv)
 
 	ConvertRgbToYuv(yuv.Get(), queueWrapper.graphicsCommandList.Get(), &cbvSrvUav, &rootSignature, &pipelineState);
 	queueWrapper.CloseCommandListExecuteAndWaitUntilDone();
+
+	/*textureLoader.SaveTextureToPngFile(
+		yuv.Get(),
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+		L"out.png",
+		device.Get(),
+		&queueWrapper);*/
 
 	if (graphicsAnalysis)
 		graphicsAnalysis->EndCapture();
