@@ -113,8 +113,9 @@ public:
 
 		ComPtr<ID3D12Resource> result;
 
+		auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 		DX::ThrowIfFailed(device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+			&defaultHeap,
 			D3D12_HEAP_FLAG_NONE,
 			&resourceDesc,
 			D3D12_RESOURCE_STATE_COPY_DEST,
@@ -123,11 +124,13 @@ public:
 
 		const UINT64 uploadBufferSize = GetRequiredIntermediateSize(result.Get(), 0, 1);
 
+		auto uploadHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD);
+		auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize);
 		ComPtr<ID3D12Resource> upload;
 		DX::ThrowIfFailed(device->CreateCommittedResource(
-			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
+			&uploadHeap,
 			D3D12_HEAP_FLAG_NONE,
-			&CD3DX12_RESOURCE_DESC::Buffer(uploadBufferSize),
+			&bufferDesc,
 			D3D12_RESOURCE_STATE_GENERIC_READ,
 			nullptr,
 			IID_PPV_ARGS(&upload)));
@@ -381,9 +384,10 @@ ComPtr<ID3D12Resource> CreateCompatibleYuvResource(ID3D12Resource* rgb, ID3D12De
 	resourceDesc.SampleDesc.Quality = 0;
 	resourceDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
 
+	auto defaultHeap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 	ComPtr<ID3D12Resource> result;
 	DX::ThrowIfFailed(device->CreateCommittedResource(
-		&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+		&defaultHeap,
 		D3D12_HEAP_FLAG_NONE,
 		&resourceDesc,
 		D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
