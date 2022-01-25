@@ -2,7 +2,10 @@ RWTexture2D<float4> rgb : register(u0);
 RWTexture2D<float> yuv_luminance : register(u1);
 RWTexture2D<float2> yuv_chrominance : register(u2);
 
-uint2 imageSize : register(b0);
+cbuffer MyConstantBuffer : register(b0)
+{
+    uint2 imageSize;
+}
 
 void OutputY(uint3 groupID, uint3 threadID)
 {
